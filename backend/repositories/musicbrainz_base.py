@@ -1,3 +1,5 @@
+import asyncio
+import logging
 from typing import Any, TypeVar
 
 import httpx
@@ -8,13 +10,21 @@ from core.exceptions import (
     InvalidExternalPayloadError,
     RateLimitedError,
 )
-from infrastructure.resilience.retry import with_retry, CircuitBreaker
+from infrastructure.resilience.retry import (
+    CircuitBreaker,
+    CircuitOpenError,
+)
 from infrastructure.resilience.rate_limiter import TokenBucketRateLimiter
+from infrastructure.resilience.musicbrainz_queue import musicbrainz_request_queue
 from infrastructure.queue.priority_queue import RequestPriority, get_priority_queue
 from infrastructure.http.deduplication import RequestDeduplicator
 from infrastructure.service_health import report_breaker_health
 
 _mb_api_base: str = "https://musicbrainz.org/ws/2"
+logger = logging.getLogger(__name__)
+
+MB_MAX_ATTEMPTS = 2
+MB_RETRY_DELAY_SECONDS = 30.0
 
 
 def get_mb_api_base() -> str:
@@ -39,9 +49,8 @@ mb_circuit_breaker = CircuitBreaker(
     ),
 )
 
-# MusicBrainz requires clients to make no more than one request per second:
-# https://musicbrainz.org/doc/MusicBrainz_API/Rate_Limiting
-# A larger bucket preserves the average refill rate but still permits a cold-start burst.
+# Backward-compatible live settings snapshot. Physical requests do not acquire this
+# token bucket: the process-wide FIFO queue below is the authoritative governor.
 mb_rate_limiter = TokenBucketRateLimiter(rate=1.0, capacity=1)
 
 mb_deduplicator = RequestDeduplicator()
@@ -75,67 +84,154 @@ def get_mb_http_client() -> httpx.AsyncClient:
     return _http_client
 
 
-@with_retry(
-    max_attempts=3,
-    circuit_breaker=mb_circuit_breaker,
-    retriable_exceptions=(httpx.HTTPError, ExternalServiceError),
-    non_breaking_exceptions=(InvalidExternalPayloadError,),
-    non_retriable_exceptions=(InvalidExternalPayloadError,),
-)
+async def mb_network_get(
+    url: str,
+    *,
+    params: dict[str, Any],
+    priority: RequestPriority,
+    label: str,
+    attempt: int,
+    client: httpx.AsyncClient | None = None,
+) -> httpx.Response:
+    """Run one physical MusicBrainz request through the process-wide queue."""
+
+    priority_mgr = get_priority_queue()
+    semaphore = await priority_mgr.acquire_slot(priority)
+    async with semaphore:
+        resolved_client = client or get_mb_http_client()
+        return await musicbrainz_request_queue.execute(
+            lambda: resolved_client.get(url, params=params),
+            label=label,
+            attempt=attempt,
+        )
+
+
+async def _mb_api_get_attempt(
+    path: str,
+    params: dict[str, Any] | None = None,
+    priority: RequestPriority = RequestPriority.USER_INITIATED,
+    decode_type: type[T] | None = None,
+    *,
+    attempt: int,
+) -> dict[str, Any] | T:
+    url = f"{get_mb_api_base()}{path}"
+    request_params = dict(params) if params else {}
+    request_params["fmt"] = "json"
+    response = await mb_network_get(
+        url,
+        params=request_params,
+        priority=priority,
+        label=path,
+        attempt=attempt,
+    )
+    if response.status_code == 404:
+        if decode_type is not None:
+            return decode_type()
+        return {}
+    if response.status_code == 429:
+        retry_after_header = response.headers.get("Retry-After")
+        try:
+            retry_after = (
+                float(retry_after_header) if retry_after_header is not None else None
+            )
+        except ValueError:
+            retry_after = None
+        raise RateLimitedError(
+            f"MusicBrainz rate limited (429): {path}",
+            retry_after_seconds=retry_after,
+        )
+    if response.status_code == 503:
+        raise ExternalServiceError(f"MusicBrainz rate limited (503): {path}")
+    if response.status_code != 200:
+        raise ExternalServiceError(
+            f"MusicBrainz API error ({response.status_code}): {path}"
+        )
+    try:
+        if decode_type is not None:
+            return _decode_typed_response(response, decode_type)
+        return _decode_json_response(response)
+    except msgspec.ValidationError as exc:
+        # deterministic per payload (e.g. a field MusicBrainz sends as JSON
+        # null), so it says nothing about service health and never counts
+        # toward the circuit breaker
+        raise InvalidExternalPayloadError(
+            f"MusicBrainz returned an unexpected payload shape for {path}: {exc}"
+        ) from exc
+    except (msgspec.DecodeError, TypeError) as exc:
+        raise ExternalServiceError(
+            f"MusicBrainz returned invalid JSON payload for {path}: {exc}"
+        ) from exc
+
+
 async def mb_api_get(
     path: str,
     params: dict[str, Any] | None = None,
     priority: RequestPriority = RequestPriority.USER_INITIATED,
     decode_type: type[T] | None = None,
 ) -> dict[str, Any] | T:
-    priority_mgr = get_priority_queue()
-    semaphore = await priority_mgr.acquire_slot(priority)
-    async with semaphore:
-        await mb_rate_limiter.acquire()
-        client = get_mb_http_client()
-        url = f"{get_mb_api_base()}{path}"
-        request_params = dict(params) if params else {}
-        request_params["fmt"] = "json"
-        response = await client.get(url, params=request_params)
-        if response.status_code == 404:
-            if decode_type is not None:
-                return decode_type()
-            return {}
-        if response.status_code == 429:
-            retry_after_header = response.headers.get("Retry-After")
-            try:
-                retry_after = (
-                    float(retry_after_header)
-                    if retry_after_header is not None
-                    else None
-                )
-            except ValueError:
-                retry_after = None
-            raise RateLimitedError(
-                f"MusicBrainz rate limited (429): {path}",
-                retry_after_seconds=retry_after,
-            )
-        if response.status_code == 503:
-            raise ExternalServiceError(f"MusicBrainz rate limited (503): {path}")
-        if response.status_code != 200:
-            raise ExternalServiceError(
-                f"MusicBrainz API error ({response.status_code}): {path}"
-            )
+    """Fetch MusicBrainz data without allowing retries to bypass serialization."""
+
+    await mb_circuit_breaker.atry_transition()
+    if mb_circuit_breaker.is_open():
+        if mb_circuit_breaker.should_log_open_warning():
+            logger.warning("Circuit breaker 'musicbrainz' is OPEN")
+        raise CircuitOpenError(
+            "Circuit breaker 'musicbrainz' is OPEN",
+            breaker_name="musicbrainz",
+        )
+
+    for attempt in range(1, MB_MAX_ATTEMPTS + 1):
         try:
-            if decode_type is not None:
-                return _decode_typed_response(response, decode_type)
-            return _decode_json_response(response)
-        except msgspec.ValidationError as exc:
-            # deterministic per payload (e.g. a field MusicBrainz sends as JSON
-            # null), so it says nothing about service health and never counts
-            # toward the circuit breaker
-            raise InvalidExternalPayloadError(
-                f"MusicBrainz returned an unexpected payload shape for {path}: {exc}"
-            ) from exc
-        except (msgspec.DecodeError, TypeError) as exc:
-            raise ExternalServiceError(
-                f"MusicBrainz returned invalid JSON payload for {path}: {exc}"
-            ) from exc
+            result = await _mb_api_get_attempt(
+                path,
+                params=params,
+                priority=priority,
+                decode_type=decode_type,
+                attempt=attempt,
+            )
+        except InvalidExternalPayloadError:
+            raise
+        except httpx.RemoteProtocolError as exc:
+            await mb_circuit_breaker.arecord_failure()
+            logger.error(
+                "MusicBrainz remote protocol failure; not retrying immediately "
+                "path=%s attempt=%d error=%s",
+                path,
+                attempt,
+                exc,
+            )
+            raise
+        except (httpx.HTTPError, ExternalServiceError) as exc:
+            if attempt >= MB_MAX_ATTEMPTS:
+                await mb_circuit_breaker.arecord_failure()
+                logger.error(
+                    "MusicBrainz request failed after %d serialized attempts "
+                    "path=%s error=%s",
+                    attempt,
+                    path,
+                    exc,
+                )
+                raise
+            retry_after = getattr(exc, "retry_after_seconds", None)
+            try:
+                requested_delay = float(retry_after) if retry_after is not None else 0.0
+            except (TypeError, ValueError):
+                requested_delay = 0.0
+            delay = max(MB_RETRY_DELAY_SECONDS, requested_delay)
+            logger.warning(
+                "MusicBrainz request will retry through global queue "
+                "path=%s next_attempt=%d backoff_seconds=%.1f error=%s",
+                path,
+                attempt + 1,
+                delay,
+                exc,
+            )
+            await asyncio.sleep(delay)
+        else:
+            await mb_circuit_breaker.arecord_success()
+            return result
+
+    raise RuntimeError("MusicBrainz retry loop exited unexpectedly")
 
 
 def should_include_release(

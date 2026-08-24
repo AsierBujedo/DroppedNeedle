@@ -6,13 +6,11 @@ circuit breaker. A single release whose payload violates the verified schema
 able to open the breaker and take the whole integration down.
 """
 
-from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 
-import infrastructure.resilience.retry as retry_module
 import repositories.musicbrainz_base as mb_base
 from core.exceptions import ExternalServiceError, InvalidExternalPayloadError
 from infrastructure.resilience.retry import CircuitOpenError, CircuitState
@@ -21,11 +19,15 @@ from repositories.musicbrainz_management_models import MbManagementRelease
 
 @pytest.fixture
 def fake_transport(monkeypatch):
-    """Instant limiter and retry sleeps around a pristine shared breaker."""
+    """Run queue operations and retry sleeps instantly around a pristine breaker."""
+
+    async def execute_immediately(operation, **_kwargs):
+        return await operation()
+
     monkeypatch.setattr(
-        mb_base, "mb_rate_limiter", SimpleNamespace(acquire=AsyncMock())
+        mb_base.musicbrainz_request_queue, "execute", execute_immediately
     )
-    monkeypatch.setattr(retry_module, "asyncio", SimpleNamespace(sleep=AsyncMock()))
+    monkeypatch.setattr(mb_base.asyncio, "sleep", AsyncMock())
     mb_base.mb_circuit_breaker.reset()
     yield
     mb_base.mb_circuit_breaker.reset()
@@ -72,7 +74,7 @@ async def test_service_failure_still_counts_toward_breaker(
 
 
 @pytest.mark.asyncio
-async def test_stream_reset_is_retried_and_success_closes_half_open_breaker(
+async def test_remote_protocol_disconnect_is_not_retried_and_reopens_half_open_breaker(
     fake_transport, monkeypatch
 ) -> None:
     calls: list[str] = []
@@ -89,18 +91,19 @@ async def test_stream_reset_is_retried_and_success_closes_half_open_breaker(
     monkeypatch.setattr(mb_base, "_http_client", _ResetThenSuccessClient())
     mb_base.mb_circuit_breaker.state = CircuitState.HALF_OPEN
 
-    result = await mb_base.mb_api_get("/release/x")
+    with pytest.raises(httpx.RemoteProtocolError, match="StreamReset"):
+        await mb_base.mb_api_get("/release/x")
 
-    assert result == {"id": "release-x"}
-    assert len(calls) == 2
-    assert mb_base.mb_circuit_breaker.state == CircuitState.CLOSED
+    assert len(calls) == 1
+    assert mb_base.mb_circuit_breaker.state == CircuitState.OPEN
     assert mb_base.mb_circuit_breaker.failure_count == 0
 
 
 @pytest.mark.asyncio
-async def test_429_honors_retry_after_then_recovers(
+async def test_429_retries_once_through_queue_after_long_backoff_floor(
     fake_transport, monkeypatch
 ) -> None:
+    queued_attempts: list[int] = []
     responses = [
         httpx.Response(429, headers={"Retry-After": "0.25"}),
         httpx.Response(200, json={"id": "release-x"}),
@@ -110,12 +113,20 @@ async def test_429_honors_retry_after_then_recovers(
         async def get(self, url, params=None):
             return responses.pop(0)
 
+    async def record_queued_attempt(operation, **kwargs):
+        queued_attempts.append(kwargs["attempt"])
+        return await operation()
+
+    monkeypatch.setattr(
+        mb_base.musicbrainz_request_queue, "execute", record_queued_attempt
+    )
     monkeypatch.setattr(mb_base, "_http_client", _RateLimitedThenSuccessClient())
 
     result = await mb_base.mb_api_get("/release/x")
 
     assert result == {"id": "release-x"}
-    retry_module.asyncio.sleep.assert_awaited_once_with(0.25)
+    assert queued_attempts == [1, 2]
+    mb_base.asyncio.sleep.assert_awaited_once_with(30.0)
     assert mb_base.mb_circuit_breaker.state == CircuitState.CLOSED
 
 

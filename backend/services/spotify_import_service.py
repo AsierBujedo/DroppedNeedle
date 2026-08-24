@@ -20,9 +20,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Maximum concurrent MusicBrainz ISRC lookups at any one time.
-# The module-level mb_rate_limiter naturally throttles to 1 req/sec;
-# this just caps the fan-out so we don't queue hundreds of coroutines
-# at once for very large playlists.
+# The process-wide MusicBrainz request queue serializes the physical HTTP calls
+# at a minimum 1.5-second interval; this only caps the number of coroutines waiting
+# to submit work for very large playlists.
 _MB_CONCURRENCY = 4
 
 

@@ -43,9 +43,10 @@ async def test_musicbrainz_client_uses_http1_with_configured_limits_and_user_age
         pool = client._transport._pool
         assert HttpClientFactory._clients.get("musicbrainz") is client
         assert pool._http2 is False
-        assert pool._max_connections == 13
-        assert pool._max_keepalive_connections == 7
+        assert pool._max_connections == 1
+        assert pool._max_keepalive_connections == 1
         assert client.headers["User-Agent"] == settings.get_user_agent()
+        assert get_musicbrainz_http_client(settings) is client
     finally:
         HttpClientFactory._clients.pop("musicbrainz", None)
         await client.aclose()

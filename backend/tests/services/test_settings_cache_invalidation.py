@@ -305,14 +305,17 @@ def mb_live_state():
         set_mb_api_base,
         mb_rate_limiter,
     )
+    from infrastructure.resilience.musicbrainz_queue import musicbrainz_request_queue
 
     base = get_mb_api_base()
     rate = mb_rate_limiter.rate
     capacity = mb_rate_limiter.capacity
+    interval = musicbrainz_request_queue.min_interval_seconds
     yield
     set_mb_api_base(base)
     mb_rate_limiter.update_rate(rate)
     mb_rate_limiter.update_capacity(capacity)
+    musicbrainz_request_queue.min_interval_seconds = interval
 
 
 def _mb_settings(api_url: str, rate_limit: float, concurrent_searches: int):
@@ -327,8 +330,10 @@ def _mb_settings(api_url: str, rate_limit: float, concurrent_searches: int):
 
 def _seed_mb_live_state(settings) -> None:
     from repositories.musicbrainz_base import set_mb_api_base, mb_rate_limiter
+    from infrastructure.resilience.musicbrainz_queue import musicbrainz_request_queue
 
     set_mb_api_base(settings.api_url)
+    musicbrainz_request_queue.update_rate(settings.rate_limit)
     mb_rate_limiter.update_rate(settings.rate_limit)
     mb_rate_limiter.update_capacity(settings.concurrent_searches)
 

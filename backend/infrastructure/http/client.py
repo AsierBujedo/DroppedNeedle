@@ -103,10 +103,12 @@ def get_musicbrainz_http_client(
     """
     if settings is None:
         settings = get_settings()
-    resolved_max_connections = max_connections or settings.http_max_connections
+    # The process-wide MusicBrainz queue is authoritative. Pinning the pool to one
+    # connection provides a second line of defence against accidental bypasses.
+    resolved_max_connections = 1
     limits = httpx.Limits(
         max_connections=resolved_max_connections,
-        max_keepalive_connections=settings.http_max_keepalive,
+        max_keepalive_connections=1,
         keepalive_expiry=60.0,
     )
     return HttpClientFactory.get_client(
@@ -114,7 +116,7 @@ def get_musicbrainz_http_client(
         timeout=timeout or settings.http_timeout,
         connect_timeout=connect_timeout or settings.http_connect_timeout,
         max_connections=resolved_max_connections,
-        max_keepalive=settings.http_max_keepalive,
+        max_keepalive=1,
         settings=settings,
         http2=False,
         transport=httpx.AsyncHTTPTransport(http2=False, retries=0, limits=limits),
