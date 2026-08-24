@@ -15,7 +15,7 @@ import pytest
 import infrastructure.resilience.retry as retry_module
 import repositories.musicbrainz_base as mb_base
 from core.exceptions import ExternalServiceError, InvalidExternalPayloadError
-from infrastructure.resilience.retry import CircuitState
+from infrastructure.resilience.retry import CircuitOpenError, CircuitState
 from repositories.musicbrainz_management_models import MbManagementRelease
 
 
@@ -69,3 +69,66 @@ async def test_service_failure_still_counts_toward_breaker(
 
     assert type(captured.value) is ExternalServiceError
     assert mb_base.mb_circuit_breaker.failure_count == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_reset_is_retried_and_success_closes_half_open_breaker(
+    fake_transport, monkeypatch
+) -> None:
+    calls: list[str] = []
+
+    class _ResetThenSuccessClient:
+        async def get(self, url, params=None):
+            calls.append(url)
+            if len(calls) == 1:
+                raise httpx.RemoteProtocolError(
+                    "<StreamReset stream_id:5, error_code:1, remote_reset:True>"
+                )
+            return httpx.Response(200, json={"id": "release-x"})
+
+    monkeypatch.setattr(mb_base, "_http_client", _ResetThenSuccessClient())
+    mb_base.mb_circuit_breaker.state = CircuitState.HALF_OPEN
+
+    result = await mb_base.mb_api_get("/release/x")
+
+    assert result == {"id": "release-x"}
+    assert len(calls) == 2
+    assert mb_base.mb_circuit_breaker.state == CircuitState.CLOSED
+    assert mb_base.mb_circuit_breaker.failure_count == 0
+
+
+@pytest.mark.asyncio
+async def test_429_honors_retry_after_then_recovers(
+    fake_transport, monkeypatch
+) -> None:
+    responses = [
+        httpx.Response(429, headers={"Retry-After": "0.25"}),
+        httpx.Response(200, json={"id": "release-x"}),
+    ]
+
+    class _RateLimitedThenSuccessClient:
+        async def get(self, url, params=None):
+            return responses.pop(0)
+
+    monkeypatch.setattr(mb_base, "_http_client", _RateLimitedThenSuccessClient())
+
+    result = await mb_base.mb_api_get("/release/x")
+
+    assert result == {"id": "release-x"}
+    retry_module.asyncio.sleep.assert_awaited_once_with(0.25)
+    assert mb_base.mb_circuit_breaker.state == CircuitState.CLOSED
+
+
+@pytest.mark.asyncio
+async def test_persistent_service_failures_open_breaker(
+    fake_transport, monkeypatch
+) -> None:
+    monkeypatch.setattr(mb_base, "_http_client", _client(b"failure", status=500))
+
+    for _ in range(mb_base.mb_circuit_breaker.failure_threshold):
+        with pytest.raises(ExternalServiceError):
+            await mb_base.mb_api_get("/release/x")
+
+    assert mb_base.mb_circuit_breaker.state == CircuitState.OPEN
+    with pytest.raises(CircuitOpenError):
+        await mb_base.mb_api_get("/release/x")

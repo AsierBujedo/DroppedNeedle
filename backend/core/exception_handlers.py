@@ -55,7 +55,7 @@ async def external_service_error_handler(
     return error_response(
         status.HTTP_503_SERVICE_UNAVAILABLE,
         EXTERNAL_SERVICE_UNAVAILABLE,
-        "External service unavailable",
+        exc.public_message or "External service unavailable",
     )
 
 

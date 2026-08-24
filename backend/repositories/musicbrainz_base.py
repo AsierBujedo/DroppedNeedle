@@ -3,7 +3,11 @@ from typing import Any, TypeVar
 import httpx
 import msgspec
 
-from core.exceptions import ExternalServiceError, InvalidExternalPayloadError
+from core.exceptions import (
+    ExternalServiceError,
+    InvalidExternalPayloadError,
+    RateLimitedError,
+)
 from infrastructure.resilience.retry import with_retry, CircuitBreaker
 from infrastructure.resilience.rate_limiter import TokenBucketRateLimiter
 from infrastructure.queue.priority_queue import RequestPriority, get_priority_queue
@@ -24,8 +28,8 @@ def set_mb_api_base(url: str) -> None:
 
 mb_circuit_breaker = CircuitBreaker(
     failure_threshold=5,
-    success_threshold=2,
-    timeout=60.0,
+    success_threshold=1,
+    timeout=20.0,
     name="musicbrainz",
     on_state_change=report_breaker_health(
         "musicbrainz",
@@ -97,6 +101,20 @@ async def mb_api_get(
             if decode_type is not None:
                 return decode_type()
             return {}
+        if response.status_code == 429:
+            retry_after_header = response.headers.get("Retry-After")
+            try:
+                retry_after = (
+                    float(retry_after_header)
+                    if retry_after_header is not None
+                    else None
+                )
+            except ValueError:
+                retry_after = None
+            raise RateLimitedError(
+                f"MusicBrainz rate limited (429): {path}",
+                retry_after_seconds=retry_after,
+            )
         if response.status_code == 503:
             raise ExternalServiceError(f"MusicBrainz rate limited (503): {path}")
         if response.status_code != 200:

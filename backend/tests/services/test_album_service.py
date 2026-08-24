@@ -367,6 +367,7 @@ async def test_different_edition_pin_fetches_only_that_selected_release():
         "pinned-rel",
         includes=["recordings", "labels"],
         priority=RequestPriority.USER_INITIATED,
+        raise_on_unavailable=True,
     )
 
 

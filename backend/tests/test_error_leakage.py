@@ -24,6 +24,13 @@ def _build_app() -> FastAPI:
     async def raise_external():
         raise ExternalServiceError("connection to 10.0.0.5:8096 refused")
 
+    @app.get("/raise-external-public")
+    async def raise_external_public():
+        raise ExternalServiceError(
+            "connection to 10.0.0.5:8096 refused",
+            public_message="MusicBrainz is temporarily unavailable. Please try again.",
+        )
+
     @app.get("/raise-circuit")
     async def raise_circuit():
         raise CircuitOpenError(
@@ -65,6 +72,21 @@ async def test_external_service_error_hides_details():
 
 
 @pytest.mark.asyncio
+async def test_external_service_error_can_expose_reviewed_public_message():
+    app = _build_app()
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/raise-external-public")
+
+    body = resp.json()
+    assert resp.status_code == 503
+    assert body["error"]["message"] == (
+        "MusicBrainz is temporarily unavailable. Please try again."
+    )
+    assert "10.0.0.5" not in resp.text
+
+
+@pytest.mark.asyncio
 async def test_circuit_open_error_hides_details():
     app = _build_app()
     transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
@@ -73,8 +95,14 @@ async def test_circuit_open_error_hides_details():
 
     body = resp.json()
     assert resp.status_code == 503
-    assert body["error"]["message"] == "Jellyfin is temporarily unavailable due to repeated connection failures. Check your settings or wait for the service to recover."
-    assert "circuit breaker" not in resp.text.lower() or "CIRCUIT_BREAKER_OPEN" in resp.text
+    assert (
+        body["error"]["message"]
+        == "Jellyfin is temporarily unavailable due to repeated connection failures. Check your settings or wait for the service to recover."
+    )
+    assert (
+        "circuit breaker" not in resp.text.lower()
+        or "CIRCUIT_BREAKER_OPEN" in resp.text
+    )
 
 
 @pytest.mark.asyncio

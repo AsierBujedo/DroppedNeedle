@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 from fastapi import FastAPI
 
 from api.v1.routes import tracks
+from core.exceptions import ExternalServiceError, ValidationError
 from core.dependencies import get_acquisition_dispatcher, get_quota_service
 from middleware import _get_current_user
 from services.native.download_service import ALREADY_IN_LIBRARY
@@ -16,7 +17,9 @@ def _app(service, quota=None) -> FastAPI:
     app.include_router(tracks.router)
     app.dependency_overrides[get_acquisition_dispatcher] = lambda: service
     app.dependency_overrides[get_quota_service] = lambda: quota or AsyncMock()
-    app.dependency_overrides[_get_current_user] = lambda: mock_user(role="user", user_id="u1")
+    app.dependency_overrides[_get_current_user] = lambda: mock_user(
+        role="user", user_id="u1"
+    )
     return app
 
 
@@ -66,11 +69,11 @@ def test_request_track_unauthenticated_401():
 def test_request_track_over_quota_rejected_at_submit():
     """Track asks bypass approval but still count toward the request quota (D20):
     an over-quota user is rejected before the download service is touched."""
-    from core.exceptions import ValidationError
-
     service = AsyncMock()
     quota = AsyncMock()
-    quota.check_request_quota.side_effect = ValidationError("Request limit reached (5 per 7 days)")
+    quota.check_request_quota.side_effect = ValidationError(
+        "Request limit reached (5 per 7 days)"
+    )
 
     response = build_test_client(_app(service, quota)).post(
         "/tracks/rec-1/request",
@@ -81,3 +84,40 @@ def test_request_track_over_quota_rejected_at_submit():
     assert "Request limit reached" in response.json()["error"]["message"]
     service.request_track.assert_not_awaited()
     quota.check_request_quota.assert_awaited_once_with("u1", "user")
+
+
+def test_request_track_musicbrainz_outage_returns_503():
+    service = AsyncMock()
+    service.request_track.side_effect = ExternalServiceError(
+        "MusicBrainz exact-edition verification failed: internal transport detail",
+        public_message=(
+            "MusicBrainz is temporarily unavailable. No download was started. "
+            "Please try again shortly."
+        ),
+    )
+
+    response = build_test_client(_app(service)).post(
+        "/tracks/rec-1/request",
+        json={"artist_name": "Radiohead", "track_title": "Airbag"},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["message"].startswith(
+        "MusicBrainz is temporarily unavailable"
+    )
+    assert "internal transport detail" not in response.text
+
+
+def test_request_track_invalid_edition_returns_400():
+    service = AsyncMock()
+    service.request_track.side_effect = ValidationError(
+        "The selected exact edition does not belong to this album"
+    )
+
+    response = build_test_client(_app(service)).post(
+        "/tracks/rec-1/request",
+        json={"artist_name": "Radiohead", "track_title": "Airbag"},
+    )
+
+    assert response.status_code == 400
+    assert "does not belong" in response.json()["error"]["message"]
