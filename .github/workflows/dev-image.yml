@@ -60,8 +60,28 @@ jobs:
           python -m pip install --upgrade pip setuptools wheel
           python -m pip install -r requirements-dev.txt
 
-      - name: Run backend tests
-        run: python -m pytest
+      - name: Run standard backend tests (batched)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -d '' test_files < <(
+            find tests -type f -name 'test_*.py' \
+              ! -path 'tests/benchmarks/*' -print0 | sort -z
+          )
+          batch_size=24
+          for ((start=0; start<${#test_files[@]}; start+=batch_size)); do
+            end=$((start + batch_size))
+            if ((end > ${#test_files[@]})); then
+              end=${#test_files[@]}
+            fi
+            echo "Backend test batch $((start + 1))-$end of ${#test_files[@]} files"
+            printf '  %s\n' "${test_files[@]:start:batch_size}"
+            if ! timeout --signal=TERM 15m \
+              python -m pytest "${test_files[@]:start:batch_size}"; then
+              echo "Backend test batch failed or exceeded 15 minutes" >&2
+              exit 1
+            fi
+          done
 
   frontend-tests:
     name: Frontend tests
