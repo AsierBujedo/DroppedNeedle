@@ -37,6 +37,28 @@ logger = logging.getLogger(__name__)
 
 _DISC_DIR = re.compile(r"\b(?:Disc|CD)\s*\d+\b", re.IGNORECASE)
 _LOSSLESS_EXT = {"flac", "alac", "wav", "ape", "wv"}
+# Kept local to the repository so the filesystem locator does not depend on the
+# services layer.  The size-only fallback must never mistake artwork, playlists,
+# or other sidecar files for a completed audio download.
+_AUDIO_SUFFIXES = {
+    ".aac",
+    ".alac",
+    ".ape",
+    ".dff",
+    ".dsf",
+    ".flac",
+    ".m4a",
+    ".m4b",
+    ".mp3",
+    ".mp4",
+    ".oga",
+    ".ogg",
+    ".opus",
+    ".wav",
+    ".wavpack",
+    ".wma",
+    ".wv",
+}
 
 
 def _normalised_filename(value: str) -> str:
@@ -315,20 +337,15 @@ class SlskdRepository:
                         return cand
         except OSError as exc:
             logger.warning("Could not scan downloads mount %s: %s", mount, exc)
-        # 5. Last resort: slskd sanitised the FILENAME (illegal chars stripped), so
+        # 5. slskd sanitised the FILENAME (illegal chars stripped), so
         # the basename no longer matches. An exact byte-size match under the peer's
         # folder recovers it - size is a strong key and the scope keeps it precise.
         if size and user_root is not None and user_root.is_dir():
-
-            def _matches_size(entry: Path) -> bool:
-                try:
-                    return entry.stat().st_size == size
-                except OSError:
-                    return False
-
-            hit = self._walk_find(user_root, mount, _matches_size)
-            if hit is not None:
-                return hit
+            peer_size_matches, complete = self._walk_audio_size_matches(
+                user_root, mount, size
+            )
+            if complete and len(peer_size_matches) == 1:
+                return peer_size_matches[0]
 
         # 6. Whole-mount fallback for a file nested deeper than the cheap steps look,
         # under a folder that isn't the peer's username (e.g. {downloads}/{artist}/
@@ -349,6 +366,35 @@ class SlskdRepository:
         hit = self._walk_find(mount, mount, _name_size_match)
         if hit is not None:
             return hit
+
+        # 7. slskd may both rename the file and place it under an album folder rather
+        # than {mount}/{username}.  At that point the expected basename cannot help,
+        # so exact size is the only remaining correlation key.  Search audio files
+        # only and require a unique result across the bounded, complete walk; choosing
+        # the first of multiple matches would import an arbitrary track.
+        if size is not None and size > 0:
+            size_matches, complete = self._walk_audio_size_matches(mount, mount, size)
+            if complete and len(size_matches) == 1:
+                return size_matches[0]
+            if len(size_matches) > 1:
+                logger.warning(
+                    "Ambiguous slskd whole-mount size-only match for %s (%d bytes); "
+                    "candidate paths: %s",
+                    basename,
+                    size,
+                    [str(path) for path in size_matches],
+                )
+                return None
+            if size_matches and not complete:
+                logger.warning(
+                    "Could not prove a unique slskd whole-mount size-only match for "
+                    "%s (%d bytes) because the bounded walk was incomplete; "
+                    "candidate paths: %s",
+                    basename,
+                    size,
+                    [str(path) for path in size_matches],
+                )
+                return None
         try:
             top_level = sum(1 for _ in mount.iterdir())
         except OSError:
@@ -362,6 +408,73 @@ class SlskdRepository:
             top_level,
         )
         return None
+
+    @staticmethod
+    def _walk_audio_size_matches(
+        root: Path, mount: Path, expected_size: int
+    ) -> tuple[list[Path], bool]:
+        """Collect exact-size audio files in newest-first order.
+
+        The traversal has the same 10,000-entry ceiling as ``_walk_find``.  The
+        boolean reports whether the whole reachable tree was inspected: callers must
+        not claim uniqueness when the cap or an unreadable directory hid candidates.
+        Resolved paths are deduplicated so symlink aliases cannot manufacture an
+        ambiguous match, and directory symlinks cannot escape the downloads mount.
+        """
+        max_entries = 10000
+        matches: dict[Path, int] = {}
+        try:
+            resolved_mount = mount.resolve()
+            resolved_root = root.resolve()
+        except OSError:
+            return [], False
+        if not resolved_root.is_relative_to(resolved_mount):
+            return [], False
+
+        stack = [resolved_root]
+        seen_dirs = {resolved_root}
+        seen_entries = 0
+        complete = True
+        while stack:
+            directory = stack.pop()
+            try:
+                entries = directory.iterdir()
+                for entry in entries:
+                    seen_entries += 1
+                    if seen_entries > max_entries:
+                        complete = False
+                        stack.clear()
+                        break
+                    try:
+                        if entry.is_dir():
+                            resolved_dir = entry.resolve()
+                            if (
+                                resolved_dir.is_relative_to(resolved_mount)
+                                and resolved_dir not in seen_dirs
+                            ):
+                                seen_dirs.add(resolved_dir)
+                                stack.append(resolved_dir)
+                            continue
+                        if (
+                            not entry.is_file()
+                            or entry.suffix.casefold() not in _AUDIO_SUFFIXES
+                        ):
+                            continue
+                        stat = entry.stat()
+                        if stat.st_size != expected_size:
+                            continue
+                        resolved = entry.resolve()
+                        if resolved.is_relative_to(resolved_mount):
+                            matches[resolved] = max(
+                                stat.st_mtime_ns, matches.get(resolved, 0)
+                            )
+                    except OSError:
+                        complete = False
+            except OSError:
+                complete = False
+
+        ordered = sorted(matches, key=lambda path: (-matches[path], str(path)))
+        return ordered, complete
 
     @staticmethod
     def _walk_find(root: Path, mount: Path, predicate) -> Path | None:

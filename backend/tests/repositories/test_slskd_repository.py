@@ -490,16 +490,17 @@ async def test_get_file_path_size_fallback_for_sanitised_filename(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_get_file_path_size_fallback_is_scoped_to_peer(tmp_path):
-    # a same-size file under a DIFFERENT peer must not be returned by the size fallback
+async def test_get_file_path_size_fallback_prefers_expected_peer_scope(tmp_path):
+    # A unique exact-size candidate inside the expected peer remains more precise than
+    # a same-size file elsewhere, so preserve the existing peer-scoped priority.
+    (tmp_path / "peer1").mkdir()
+    expected = tmp_path / "peer1" / "sanitised.flac"
+    expected.write_bytes(b"abcdefghij")
     (tmp_path / "other").mkdir()
-    (tmp_path / "other" / "decoy.flac").write_bytes(
-        b"abcdefghij"
-    )  # size 10, wrong peer
+    (tmp_path / "other" / "decoy.flac").write_bytes(b"abcdefghij")
     repo = SlskdRepository(client=None, url="", api_key="", downloads_mount=tmp_path)
-    assert (
-        await repo.get_file_path(_h("peer1"), "@@p\\A\\missing.flac", size=10) is None
-    )
+    path = await repo.get_file_path(_h("peer1"), "@@p\\A\\missing.flac", size=10)
+    assert path == expected.resolve()
 
 
 @pytest.mark.asyncio
@@ -567,6 +568,73 @@ async def test_get_file_path_whole_mount_fallback_disambiguates_by_size(tmp_path
         _h("peer1"), "@@p\\X\\AlbumB\\01 - Track.flac", size=10
     )
     assert path == right.resolve()
+
+
+@pytest.mark.asyncio
+async def test_get_file_path_whole_mount_size_fallback_resolves_renamed_audio(
+    tmp_path,
+):
+    # slskd can discard the remote filename and use the album track title on disk.
+    # The file is not under {mount}/{username}, so only the final unique-size scan can
+    # correlate it. A same-size cover proves the fallback considers audio files only.
+    album = tmp_path / "Viva la Vida or Death and All His Friends"
+    album.mkdir()
+    expected = album / "08 - Viva la Vida.flac"
+    expected.write_bytes(b"abcdefghij")
+    (album / "cover.jpg").write_bytes(b"abcdefghij")
+    repo = SlskdRepository(client=None, url="", api_key="", downloads_mount=tmp_path)
+
+    path = await repo.get_file_path(
+        _h("peer1"), "Coldplay - Viva La Vida.flac", size=10
+    )
+
+    assert path == expected.resolve()
+
+
+@pytest.mark.asyncio
+async def test_get_file_path_whole_mount_size_fallback_rejects_ambiguity(
+    tmp_path, caplog
+):
+    first = tmp_path / "Album A" / "01 - Renamed.flac"
+    first.parent.mkdir()
+    first.write_bytes(b"abcdefghij")
+    second = tmp_path / "Album B" / "08 - Also Renamed.mp3"
+    second.parent.mkdir()
+    second.write_bytes(b"abcdefghij")
+    repo = SlskdRepository(client=None, url="", api_key="", downloads_mount=tmp_path)
+
+    with caplog.at_level("WARNING"):
+        path = await repo.get_file_path(
+            _h("peer1"), "Coldplay - Viva La Vida.flac", size=10
+        )
+
+    assert path is None
+    warning = next(
+        record
+        for record in caplog.records
+        if "Ambiguous slskd whole-mount size-only match" in record.message
+    )
+    assert "Coldplay - Viva La Vida.flac" in warning.message
+    assert "10 bytes" in warning.message
+    assert str(first.resolve()) in warning.message
+    assert str(second.resolve()) in warning.message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [None, 0])
+async def test_get_file_path_whole_mount_size_fallback_requires_known_positive_size(
+    tmp_path, size
+):
+    album = tmp_path / "Viva la Vida or Death and All His Friends"
+    album.mkdir()
+    (album / "08 - Viva la Vida.flac").write_bytes(b"abcdefghij")
+    repo = SlskdRepository(client=None, url="", api_key="", downloads_mount=tmp_path)
+
+    path = await repo.get_file_path(
+        _h("peer1"), "Coldplay - Viva La Vida.flac", size=size
+    )
+
+    assert path is None
 
 
 def _completed(filename, username="peer"):
