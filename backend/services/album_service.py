@@ -573,7 +573,6 @@ class AlbumService:
                     candidate_id,
                     includes=["recordings", "labels"],
                     priority=priority,
-                    raise_on_unavailable=True,
                 )
             except Exception:
                 logger.warning(
@@ -713,7 +712,6 @@ class AlbumService:
             release_mbid,
             includes=["recordings", "labels"],
             priority=priority,
-            raise_on_unavailable=True,
         )
         if not release_data:
             raise ResourceNotFoundError("The selected exact edition is unavailable")
@@ -797,7 +795,6 @@ class AlbumService:
             release_group_id,
             includes=includes,
             priority=priority,
-            raise_on_unavailable=True,
         )
 
         if not rg_result:
@@ -813,7 +810,6 @@ class AlbumService:
                     resolved_id,
                     includes=includes,
                     priority=priority,
-                    raise_on_unavailable=True,
                 )
 
         if not rg_result:

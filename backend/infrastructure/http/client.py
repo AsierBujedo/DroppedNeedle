@@ -11,7 +11,7 @@ def _get_user_agent(settings: Optional[Settings] = None) -> str:
 
 class HttpClientFactory:
     _clients: dict[str, httpx.AsyncClient] = {}
-
+    
     @classmethod
     def get_client(
         cls,
@@ -22,8 +22,7 @@ class HttpClientFactory:
         max_keepalive: int = 200,
         settings: Optional[Settings] = None,
         http2: bool = True,
-        transport: Optional[httpx.AsyncBaseTransport] = None,
-        **kwargs,
+        **kwargs
     ) -> httpx.AsyncClient:
         if name not in cls._clients:
             cls._clients[name] = httpx.AsyncClient(
@@ -35,12 +34,12 @@ class HttpClientFactory:
                     keepalive_expiry=60.0,
                 ),
                 follow_redirects=True,
-                transport=transport or httpx.AsyncHTTPTransport(http2=http2, retries=0),
+                transport=httpx.AsyncHTTPTransport(http2=http2, retries=0),
                 headers={"User-Agent": _get_user_agent(settings)},
-                **kwargs,
+                **kwargs
             )
         return cls._clients[name]
-
+    
     @classmethod
     async def close_all(cls) -> None:
         for client in cls._clients.values():
@@ -88,41 +87,6 @@ def get_listenbrainz_http_client(
     )
 
 
-def get_musicbrainz_http_client(
-    settings: Optional[Settings] = None,
-    timeout: Optional[float] = None,
-    connect_timeout: Optional[float] = None,
-    max_connections: Optional[int] = None,
-) -> httpx.AsyncClient:
-    """Return the provider-specific MusicBrainz client.
-
-    MusicBrainz occasionally resets HTTP/2 streams remotely. Keeping this client on
-    HTTP/1.1 avoids those connection-wide failures without changing the transport used
-    by any other provider. Limits are applied to the explicit transport because httpx
-    does not apply the client's ``limits`` argument to a caller-supplied transport.
-    """
-    if settings is None:
-        settings = get_settings()
-    # The process-wide MusicBrainz queue is authoritative. Pinning the pool to one
-    # connection provides a second line of defence against accidental bypasses.
-    resolved_max_connections = 1
-    limits = httpx.Limits(
-        max_connections=resolved_max_connections,
-        max_keepalive_connections=1,
-        keepalive_expiry=60.0,
-    )
-    return HttpClientFactory.get_client(
-        name="musicbrainz",
-        timeout=timeout or settings.http_timeout,
-        connect_timeout=connect_timeout or settings.http_connect_timeout,
-        max_connections=resolved_max_connections,
-        max_keepalive=1,
-        settings=settings,
-        http2=False,
-        transport=httpx.AsyncHTTPTransport(http2=False, retries=0, limits=limits),
-    )
-
-
 def get_coverart_http_client(settings: Optional[Settings] = None) -> httpx.AsyncClient:
     """Dedicated client for cover-art fetches (Cover Art Archive -> archive.org CDN,
     Wikidata/Wikimedia, media-server art). Covers are degradable, so this client uses a
@@ -130,7 +94,7 @@ def get_coverart_http_client(settings: Optional[Settings] = None) -> httpx.Async
     had quickly falls through to the placeholder and is warmed in the background instead of
     holding the request open. A separate name is required because HttpClientFactory caches
     by name and the first caller's kwargs win, so the shared "default" client can't be
-    retuned for covers without affecting other metadata providers."""
+    retuned for covers without affecting MusicBrainz et al."""
     if settings is None:
         settings = get_settings()
     return HttpClientFactory.get_client(

@@ -3,10 +3,8 @@ a raw MusicBrainz release-group dict to an AlbumInfo (year/title/artist backfill
 
 from unittest.mock import AsyncMock
 
-import httpx
 import pytest
 
-from core.exceptions import ExternalServiceError
 from models.album import AlbumInfo
 from repositories.musicbrainz_album import MusicBrainzAlbumMixin
 
@@ -21,9 +19,7 @@ _RG = {
     "title": "OK Computer",
     "first-release-date": "1997-05-21",
     "primary-type": "Album",
-    "artist-credit": [
-        {"name": "Radiohead", "artist": {"id": "art-1", "name": "Radiohead"}}
-    ],
+    "artist-credit": [{"name": "Radiohead", "artist": {"id": "art-1", "name": "Radiohead"}}],
 }
 
 
@@ -53,9 +49,7 @@ async def test_get_release_group_returns_none_when_missing():
 async def test_get_release_group_tolerates_sparse_dict():
     """No date and no artist-credit must still map without raising (year falls to None)."""
     repo = _Repo()
-    repo.get_release_group_by_id = AsyncMock(
-        return_value={"id": "rg-2", "title": "Untitled"}
-    )
+    repo.get_release_group_by_id = AsyncMock(return_value={"id": "rg-2", "title": "Untitled"})
 
     info = await repo.get_release_group("rg-2")
 
@@ -74,65 +68,13 @@ async def test_fetch_rg_negative_caches_404_but_not_transient(monkeypatch):
     repo._cache = AsyncMock()
 
     monkeypatch.setattr(mod, "mb_api_get", AsyncMock(return_value={}))
-    assert (
-        await repo._fetch_release_group_by_id("rg-404", ["artist-credits"], "ck-404")
-        is None
-    )
+    assert await repo._fetch_release_group_by_id("rg-404", ["artist-credits"], "ck-404") is None
     repo._cache.set.assert_awaited_once_with("ck-404", {}, ttl_seconds=600)
 
     repo._cache.set.reset_mock()
     monkeypatch.setattr(mod, "mb_api_get", AsyncMock(side_effect=RuntimeError("503")))
-    assert (
-        await repo._fetch_release_group_by_id("rg-503", ["artist-credits"], "ck-503")
-        is None
-    )
+    assert await repo._fetch_release_group_by_id("rg-503", ["artist-credits"], "ck-503") is None
     repo._cache.set.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_strict_release_fetch_propagates_remote_protocol_failure(monkeypatch):
-    import repositories.musicbrainz_album as mod
-
-    repo = _Repo()
-    repo._cache = AsyncMock()
-    monkeypatch.setattr(
-        mod,
-        "mb_api_get",
-        AsyncMock(
-            side_effect=httpx.RemoteProtocolError(
-                "<StreamReset stream_id:5, error_code:1, remote_reset:True>"
-            )
-        ),
-    )
-
-    with pytest.raises(ExternalServiceError, match="temporarily unavailable"):
-        await repo._fetch_release_by_id(
-            "release-x",
-            ["recordings"],
-            "ck-release",
-            raise_on_unavailable=True,
-        )
-
-    repo._cache.set.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_strict_release_fetch_preserves_definitive_404(monkeypatch):
-    import repositories.musicbrainz_album as mod
-
-    repo = _Repo()
-    repo._cache = AsyncMock()
-    monkeypatch.setattr(mod, "mb_api_get", AsyncMock(return_value={}))
-
-    assert (
-        await repo._fetch_release_by_id(
-            "release-404",
-            ["recordings"],
-            "ck-release",
-            raise_on_unavailable=True,
-        )
-        is None
-    )
 
 
 @pytest.mark.asyncio
@@ -148,9 +90,7 @@ async def test_release_to_rg_resolution_threads_priority(monkeypatch):
     repo._cache = AsyncMock()
     repo._cache.get = AsyncMock(return_value=None)
 
-    api = AsyncMock(
-        return_value=SimpleNamespace(release_group={"id": "rg-9"}, media=[])
-    )
+    api = AsyncMock(return_value=SimpleNamespace(release_group={"id": "rg-9"}, media=[]))
     monkeypatch.setattr(mod, "mb_api_get", api)
 
     resolved = await repo.get_release_group_id_from_release(

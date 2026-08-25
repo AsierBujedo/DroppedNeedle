@@ -128,19 +128,16 @@ class TestInstanceId:
 
         assert id1 == id2
 
-    def test_instance_id_in_user_agent(self, tmp_path, monkeypatch):
+    def test_instance_id_in_user_agent(self, tmp_path):
         from core.config import Settings
 
-        monkeypatch.setenv("COMMIT_TAG", "v9.8.7")
         settings = Settings(
             instance_id="a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-            contact_email="operator@example.test",
             root_app_dir=tmp_path,
         )
         ua = settings.get_user_agent()
         assert "a1b2c3d4" in ua
-        assert ua.startswith("DroppedNeedle/v9.8.7")
-        assert "operator@example.test" in ua
+        assert "DroppedNeedle/1.0" in ua
 
     def test_user_agent_unknown_when_no_instance_id(self, tmp_path):
         from core.config import Settings

@@ -185,7 +185,6 @@ async def test_exact_edition_tracklist_returns_only_requested_release(tmp_path: 
         REL_DELUXE,
         includes=["recordings", "labels"],
         priority=RequestPriority.USER_INITIATED,
-        raise_on_unavailable=True,
     )
 
 

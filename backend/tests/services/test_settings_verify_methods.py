@@ -4,10 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from infrastructure.queue.priority_queue import RequestPriority
-
 from services.settings_service import (
-    MusicBrainzVerifyResult,
     SettingsService,
     NavidromeVerifyResult,
     YouTubeVerifyResult,
@@ -24,38 +21,6 @@ def _make_service(*, preferences=None):
         cache=cache,
     )
     return service
-
-
-@pytest.mark.asyncio
-async def test_verify_musicbrainz_uses_shared_client_and_global_network_queue():
-    from api.v1.schemas.settings import MusicBrainzConnectionSettings
-
-    service = _make_service()
-    settings = MusicBrainzConnectionSettings()
-    client = MagicMock()
-    response = MagicMock(status_code=200)
-    queued_get = AsyncMock(return_value=response)
-
-    with patch("infrastructure.validators.validate_service_url"), \
-         patch("services.settings_service.get_settings", return_value=MagicMock()), \
-         patch(
-             "services.settings_service.get_musicbrainz_http_client",
-             return_value=client,
-         ), \
-         patch("repositories.musicbrainz_base.mb_network_get", queued_get), \
-         patch("repositories.musicbrainz_base.mb_circuit_breaker.reset"):
-        result = await service.verify_musicbrainz(settings)
-
-    assert isinstance(result, MusicBrainzVerifyResult)
-    assert result.valid is True
-    queued_get.assert_awaited_once_with(
-        "https://musicbrainz.org/ws/2/artist",
-        params={"query": "test", "fmt": "json", "limit": 1},
-        priority=RequestPriority.USER_INITIATED,
-        label="settings-verify:/artist",
-        attempt=1,
-        client=client,
-    )
 
 
 @pytest.mark.asyncio

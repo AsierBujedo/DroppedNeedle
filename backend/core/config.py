@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 from pydantic import Field, TypeAdapter, ValidationError as PydanticValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -159,15 +158,7 @@ class Settings(BaseSettings):
     
     def get_user_agent(self) -> str:
         id_part = self.instance_id[:8] if self.instance_id else "unknown"
-        version = (os.environ.get("COMMIT_TAG") or "dev").strip()
-        contact = self.contact_email.strip()
-        # Header values must never carry control characters from environment/config.
-        version = version.replace("\r", "").replace("\n", "") or "dev"
-        contact = contact.replace("\r", "").replace("\n", "")
-        return (
-            f"DroppedNeedle/{version} "
-            f"({contact}; instance={id_part}; https://www.droppedneedle.com)"
-        )
+        return f"DroppedNeedle/1.0 ({id_part}; {self.contact_email}; https://www.droppedneedle.com)"
 
     def load_from_file(self) -> None:
         if not self.config_file_path.exists():

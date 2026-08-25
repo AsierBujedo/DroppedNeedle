@@ -11,7 +11,6 @@ import pytest
 from core.exceptions import (
     AutomaticManagementHoldError,
     ConfigurationError,
-    ExternalServiceError,
     PermissionDeniedError,
     ResourceNotFoundError,
     ValidationError,
@@ -428,42 +427,6 @@ async def test_request_album_mb_failure_starts_no_download_without_exact_identit
 
     with pytest.raises(ValidationError, match="exact MusicBrainz edition"):
         await service.request_album("u1", "rg", "A", "B")
-
-    store.create_task.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_request_album_provider_outage_is_temporary_and_starts_no_download():
-    album_service = _single_album_service()
-    album_service.get_album_tracks_info.side_effect = ExternalServiceError(
-        "MusicBrainz unavailable"
-    )
-    service, store, *_ = _make_service(album_service=album_service)
-    store.get_active_task_for_album.return_value = None
-
-    with pytest.raises(ExternalServiceError) as captured:
-        await service.request_album("u1", "rg", "A", "B")
-
-    assert captured.value.public_message == (
-        "MusicBrainz is temporarily unavailable. No download was started. "
-        "Please try again shortly."
-    )
-    store.create_task.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_request_album_invalid_exact_edition_remains_validation_error():
-    album_service = _single_album_service()
-    album_service.get_exact_edition_tracks_info.side_effect = ResourceNotFoundError(
-        "The selected exact edition does not belong to this album"
-    )
-    service, store, *_ = _make_service(album_service=album_service)
-    store.get_active_task_for_album.return_value = None
-
-    with pytest.raises(ValidationError, match="does not belong"):
-        await service.request_album(
-            "u1", "rg", "A", "B", release_mbid="release-invalid"
-        )
 
     store.create_task.assert_not_awaited()
 

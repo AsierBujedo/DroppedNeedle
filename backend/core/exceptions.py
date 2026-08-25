@@ -14,15 +14,7 @@ class DroppedNeedleException(Exception):
 
 
 class ExternalServiceError(DroppedNeedleException):
-    def __init__(
-        self,
-        message: str,
-        details: Any = None,
-        *,
-        public_message: str | None = None,
-    ):
-        self.public_message = public_message
-        super().__init__(message, details)
+    pass
 
 
 class RateLimitedError(ExternalServiceError):

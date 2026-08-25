@@ -528,8 +528,6 @@ class MusicBrainzAlbumMixin:
         mbid: str,
         includes: list[str] | None = None,
         priority: RequestPriority = RequestPriority.USER_INITIATED,
-        *,
-        raise_on_unavailable: bool = False,
     ) -> dict | None:
         if includes is None:
             includes = ["artist-credits", "releases"]
@@ -542,16 +540,10 @@ class MusicBrainzAlbumMixin:
 
         includes_str = "+".join(sorted(includes))
         dedupe_key = f"{MB_RG_DETAIL_PREFIX}{mbid}:{includes_str}"
-        if raise_on_unavailable:
-            dedupe_key = f"{dedupe_key}:strict"
         return await mb_deduplicator.dedupe(
             dedupe_key,
             lambda: self._fetch_release_group_by_id(
-                mbid,
-                includes,
-                cache_key,
-                priority,
-                raise_on_unavailable=raise_on_unavailable,
+                mbid, includes, cache_key, priority
             ),
         )
 
@@ -561,8 +553,6 @@ class MusicBrainzAlbumMixin:
         includes: list[str],
         cache_key: str,
         priority: RequestPriority = RequestPriority.USER_INITIATED,
-        *,
-        raise_on_unavailable: bool = False,
     ) -> dict | None:
         try:
             inc_str = "+".join(sorted(includes))
@@ -585,12 +575,6 @@ class MusicBrainzAlbumMixin:
             if not isinstance(e, CircuitOpenError):
                 logger.error(f"Failed to fetch release group {mbid}: {e}")
             _record_mb_degradation(f"release group fetch failed: {e}")
-            if raise_on_unavailable and isinstance(
-                e, (httpx.HTTPError, CircuitOpenError, ExternalServiceError)
-            ):
-                raise ExternalServiceError(
-                    "MusicBrainz release-group metadata is temporarily unavailable."
-                ) from e
             return None
 
     async def get_release_group(self, release_group_mbid: str) -> AlbumInfo | None:
@@ -617,8 +601,6 @@ class MusicBrainzAlbumMixin:
         release_id: str,
         includes: list[str] | None = None,
         priority: RequestPriority = RequestPriority.USER_INITIATED,
-        *,
-        raise_on_unavailable: bool = False,
     ) -> dict | None:
         if includes is None:
             includes = ["recordings", "labels"]
@@ -631,16 +613,10 @@ class MusicBrainzAlbumMixin:
 
         includes_str = "+".join(sorted(includes))
         dedupe_key = f"{MB_RELEASE_DETAIL_PREFIX}{release_id}:{includes_str}"
-        if raise_on_unavailable:
-            dedupe_key = f"{dedupe_key}:strict"
         return await mb_deduplicator.dedupe(
             dedupe_key,
             lambda: self._fetch_release_by_id(
-                release_id,
-                includes,
-                cache_key,
-                priority,
-                raise_on_unavailable=raise_on_unavailable,
+                release_id, includes, cache_key, priority
             ),
         )
 
@@ -886,8 +862,6 @@ class MusicBrainzAlbumMixin:
         includes: list[str],
         cache_key: str,
         priority: RequestPriority = RequestPriority.USER_INITIATED,
-        *,
-        raise_on_unavailable: bool = False,
     ) -> dict | None:
         try:
             inc_str = "+".join(sorted(includes))
@@ -904,12 +878,6 @@ class MusicBrainzAlbumMixin:
             if not isinstance(e, CircuitOpenError):
                 logger.error(f"Failed to fetch release {release_id}: {e}")
             _record_mb_degradation(f"release fetch failed: {e}")
-            if raise_on_unavailable and isinstance(
-                e, (httpx.HTTPError, CircuitOpenError, ExternalServiceError)
-            ):
-                raise ExternalServiceError(
-                    "MusicBrainz release metadata is temporarily unavailable."
-                ) from e
             return None
 
     async def get_release_group_id_from_release(

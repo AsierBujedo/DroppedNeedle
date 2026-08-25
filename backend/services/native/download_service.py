@@ -17,7 +17,6 @@ from typing import TYPE_CHECKING
 from core.exceptions import (
     AutomaticManagementHoldError,
     ConfigurationError,
-    ExternalServiceError,
     PermissionDeniedError,
     ResourceNotFoundError,
     ValidationError,
@@ -26,7 +25,6 @@ from core.task_registry import TaskRegistry
 from infrastructure.persistence.download_store import DownloadStore
 from infrastructure.filesystem_mounts import check_move_boundary
 from infrastructure.queue.priority_queue import RequestPriority
-from infrastructure.resilience.retry import CircuitOpenError
 from infrastructure.sse_publisher import SSEPublisher
 from models.download import (
     DownloadsMountStatus,
@@ -325,18 +323,6 @@ class DownloadService:
                     release_group_mbid,
                     priority=priority,
                 )
-        except ResourceNotFoundError as error:
-            raise ValidationError(f"{error}. No download was started.") from error
-        except ValidationError:
-            raise
-        except (ExternalServiceError, CircuitOpenError) as error:
-            raise ExternalServiceError(
-                "MusicBrainz exact-edition verification is temporarily unavailable.",
-                public_message=(
-                    "MusicBrainz is temporarily unavailable. No download was started. "
-                    "Please try again shortly."
-                ),
-            ) from error
         except Exception as error:  # noqa: BLE001 - fail closed before any task exists
             raise ValidationError(
                 "The exact MusicBrainz edition could not be verified. No download was started."

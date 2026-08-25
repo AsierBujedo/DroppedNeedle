@@ -12,7 +12,6 @@ from repositories.musicbrainz_base import (
     set_mb_http_client,
     set_mb_api_base,
 )
-from infrastructure.resilience.musicbrainz_queue import musicbrainz_request_queue
 from repositories.musicbrainz_artist import MusicBrainzArtistMixin
 from repositories.musicbrainz_album import MusicBrainzAlbumMixin
 
@@ -45,7 +44,6 @@ class MusicBrainzRepository(MusicBrainzArtistMixin, MusicBrainzAlbumMixin):
                 settings.concurrent_searches, _OFFICIAL_MB_CONCURRENT_SEARCHES
             )
         set_mb_api_base(settings.api_url)
-        musicbrainz_request_queue.update_rate(settings.rate_limit)
         mb_rate_limiter.update_rate(settings.rate_limit)
         if mb_rate_limiter.capacity != settings.concurrent_searches:
             mb_rate_limiter.update_capacity(settings.concurrent_searches)

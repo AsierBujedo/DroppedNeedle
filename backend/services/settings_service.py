@@ -32,8 +32,7 @@ from infrastructure.cache.cache_keys import (
     home_prefixes,
 )
 from infrastructure.cache.memory_cache import InMemoryCache, CacheInterface
-from infrastructure.http.client import get_http_client, get_musicbrainz_http_client
-from infrastructure.queue.priority_queue import RequestPriority
+from infrastructure.http.client import get_http_client
 from repositories.jellyfin_models import JellyfinUser
 
 logger = logging.getLogger(__name__)
@@ -608,23 +607,16 @@ class SettingsService:
             import httpx
             from infrastructure.validators import validate_service_url
             from core.exceptions import ValidationError as AppValidationError
-            from repositories.musicbrainz_base import (
-                mb_circuit_breaker,
-                mb_network_get,
-            )
+            from repositories.musicbrainz_base import mb_circuit_breaker
 
             validate_service_url(settings.api_url, label="MusicBrainz API URL")
             mb_circuit_breaker.reset()
 
             app_settings = get_settings()
-            client = get_musicbrainz_http_client(app_settings)
-            response = await mb_network_get(
+            client = get_http_client(app_settings)
+            response = await client.get(
                 f"{settings.api_url.rstrip('/')}/artist",
                 params={"query": "test", "fmt": "json", "limit": 1},
-                priority=RequestPriority.USER_INITIATED,
-                label="settings-verify:/artist",
-                attempt=1,
-                client=client,
             )
             if response.status_code == 200:
                 return MusicBrainzVerifyResult(
@@ -661,9 +653,6 @@ class SettingsService:
             mb_circuit_breaker,
             mb_deduplicator,
         )
-        from infrastructure.resilience.musicbrainz_queue import (
-            musicbrainz_request_queue,
-        )
         from api.v1.schemas.settings import (
             is_official_musicbrainz,
             _OFFICIAL_MB_RATE_LIMIT,
@@ -690,7 +679,6 @@ class SettingsService:
             return
 
         set_mb_api_base(settings.api_url)
-        musicbrainz_request_queue.update_rate(settings.rate_limit)
         mb_rate_limiter.update_rate(settings.rate_limit)
         mb_rate_limiter.update_capacity(settings.concurrent_searches)
         mb_circuit_breaker.reset()
